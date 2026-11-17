@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
 import type { Playback } from "../model/playback";
-const props = defineProps<{ playback: Playback; branch: boolean }>();
+const props = defineProps<{
+  playback: Playback;
+  branch: boolean;
+  /** 路线引导中由播放器时钟驱动时间，视频元素不再回写 currentTime */
+  guided?: boolean;
+}>();
 const video = ref<HTMLVideoElement>();
 function sync() {
   const v = video.value;
@@ -25,6 +30,7 @@ watch(
     props.playback.state.muted,
     props.playback.state.rate,
     props.branch,
+    props.guided,
   ],
   sync,
 );
@@ -42,11 +48,10 @@ watch(
       sync();
     "
     @timeupdate="
-      !branch &&
-      playback.state.playing &&
+      !branch && !guided && playback.state.playing &&
       playback.tick(($event.target as HTMLVideoElement).currentTime)
     "
-    @ended="playback.finish()"
+    @ended="guided ? undefined : playback.finish()"
     @error="playback.state.error = '影像加载失败，请刷新重试'"
   />
   <div v-if="playback.state.error" role="status" class="media-warning">

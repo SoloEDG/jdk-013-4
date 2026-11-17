@@ -11,12 +11,20 @@ import {
   Compass,
   ChevronRight,
   X,
+  Route as RouteIcon,
 } from "lucide-vue-next";
 import { PanoramaView } from "../features/panorama";
 import { ChapterList, MediaPlayer, Transport } from "../features/chapters";
 import { HotspotLayer, HotspotDetail } from "../features/hotspots";
 import { InterviewPanel, PeopleList } from "../features/interviews";
 import { JournalPanel } from "../features/journal";
+import {
+  RecorderBar,
+  RoutesPanel,
+  RouteEditor,
+  RoutePlayerBar,
+  RouteNotices,
+} from "../features/routes";
 import { createWorkspace } from "./workspace";
 const w = createWorkspace(),
   about = ref(false),
@@ -30,6 +38,8 @@ async function fullscreen() {
     fullError.value = "当前浏览器不支持全屏";
   }
 }
+const chapterIndex = (id: string) =>
+  ["dawn", "craft", "night"].indexOf(id) + 1;
 </script>
 <template>
   <div class="site-shell">
@@ -49,6 +59,12 @@ async function fullscreen() {
           @click="w.tab.value = 'journal'"
         >
           探索手记 <span>{{ w.journal.entries.value.length }}</span></button
+        ><button
+          :class="{ active: w.tab.value === 'routes' }"
+          @click="w.tab.value = 'routes'"
+        >
+          我的路线
+          <span>{{ w.library.routes.value.length }}</span></button
         ><button @click="about = true">
           关于本片 <ArrowUpRight :size="13" />
         </button>
@@ -67,6 +83,18 @@ async function fullscreen() {
           <p>3 个章节 <i>/</i> 360° 自由探索 <i>/</i> 3 位讲述者</p>
         </div>
       </div>
+
+      <!-- 录制控制条：录制时在所有主界面可见 -->
+      <RecorderBar
+        v-if="w.tab.value === 'story' || w.tab.value === 'routes'"
+        :recorder="w.recorder"
+        @start="w.startRecording()"
+        @pause="w.recorder.pause()"
+        @resume="w.recorder.resume()"
+        @stop="w.stopRecording()"
+        @discard="w.discardRecording()"
+      />
+
       <template v-if="w.tab.value === 'story'"
         ><div class="workspace">
           <section ref="stage" class="stage">
@@ -76,6 +104,7 @@ async function fullscreen() {
               ><MediaPlayer
                 :playback="w.playback"
                 :branch="!!w.branch.personId.value"
+                :guided="w.player.mode.value === 'guided'"
               />
               <div class="stage-shade" />
               <div class="stage-top">
@@ -88,25 +117,38 @@ async function fullscreen() {
               <HotspotLayer
                 :items="w.discovery.visible.value"
                 :camera="w.camera.camera"
-                :enabled="w.discovery.enabled.value && !w.branch.personId.value"
+                :enabled="
+                  w.discovery.enabled.value &&
+                  !w.branch.personId.value &&
+                  !w.guided()
+                "
                 @open="w.dispatch({ type: 'hotspot', id: $event })"
               />
+              <RouteNotices :notices="w.player.notices.value" />
               <div class="scene-caption">
                 <small
                   >CHAPTER 0{{
-                    ["dawn", "craft", "night"].indexOf(
-                      w.playback.state.chapterId,
-                    ) + 1
+                    chapterIndex(w.playback.state.chapterId)
                   }}</small
                 >
                 <h2>{{ w.playback.chapter.value.title }}</h2>
                 <p>{{ w.playback.chapter.value.description }}</p>
               </div>
-              <div class="drag-hint">
+              <div
+                v-if="w.player.mode.value !== 'guided'"
+                class="drag-hint"
+              >
                 <MousePointer2 :size="14" /> 按住拖动，环顾四周
+              </div>
+              <div v-else class="drag-hint guided-hint">
+                <RouteIcon :size="14" /> 路线引导中，镜头将随路线自动运动
               </div></PanoramaView
             ><HotspotDetail
-              v-if="w.discovery.detail.value && !w.branch.personId.value"
+              v-if="
+                w.discovery.detail.value &&
+                !w.branch.personId.value &&
+                !w.guided()
+              "
               :hotspot="w.discovery.detail.value"
               :saved="w.journal.has(w.discovery.detail.value.id)"
               @close="w.discovery.close()"
@@ -116,12 +158,23 @@ async function fullscreen() {
               "
             /><InterviewPanel
               :branch="w.branch"
-              @back="w.dispatch({ type: 'return' })"
-            /><Transport
+              @back="
+                w.player.mode.value === 'guided'
+                  ? w.guidedBack()
+                  : w.dispatch({ type: 'return' })
+              "
+            />
+            <Transport
+              v-if="w.player.mode.value === 'idle'"
               :playback="w.playback"
               :disabled="!!w.branch.personId.value"
               @reset="w.camera.reset()"
               @fullscreen="fullscreen"
+            />
+            <RoutePlayerBar
+              v-else
+              :player="w.player"
+              @close="w.closePlayer()"
             />
             <p v-if="fullError" role="status">{{ fullError }}</p>
           </section>
@@ -145,6 +198,7 @@ async function fullscreen() {
                 aria-label="显示热点"
                 :aria-checked="w.discovery.enabled.value"
                 :class="{ on: w.discovery.enabled.value }"
+                :disabled="w.guided()"
                 @click="w.discovery.enabled.value = !w.discovery.enabled.value"
               >
                 <i />
@@ -180,11 +234,38 @@ async function fullscreen() {
             </div>
             <PeopleList @open="w.enterPerson($event)" />
           </div></section></template
-      ><JournalPanel
-        v-else
+      >
+      <JournalPanel
+        v-else-if="w.tab.value === 'journal'"
         :journal="w.journal"
         @revisit="w.dispatch({ type: 'revisit', entry: $event })"
       />
+      <template v-else>
+        <RouteEditor
+          v-if="w.editingFile.value"
+          :key="w.editingRouteId.value ?? 'editor'"
+          :route="w.editingFile.value"
+          @back="w.closeEditor()"
+          @saved="w.saveEdited($event)"
+          @play="
+            (() => {
+              w.previewFile.value = w.editingFile.value!;
+              w.playRoute(
+                w.editingRouteId.value!,
+                w.editingFile.value!,
+              );
+            })()
+          "
+        />
+        <RoutesPanel
+          v-else
+          :library="w.library"
+          :recorder="w.recorder"
+          @record="w.startRecording()"
+          @edit="w.openEditor($event)"
+          @play="w.playRoute($event)"
+        />
+      </template>
       <footer>
         <span>SHORELINE ORIGINALS <i>© 2026</i></span
         ><span>让每一段平凡的生活，被看见。 <Waves :size="18" /></span>
@@ -205,7 +286,7 @@ async function fullscreen() {
           以海港、木船与灯塔为线索的互动纪录片演示。全景为原创程序绘制示意场景，章节影像为本地生成的潮汐动画；人物与口述内容均为虚构，用于体验非线性叙事。
         </p>
         <p>
-          拖动环顾四周，滚轮调整视角；点击热点发现支线，返回主线继续观看。探索记录仅保存在此浏览器中。
+          拖动环顾四周，滚轮调整视角；点击热点发现支线，返回主线继续观看。使用「我的路线」可以录制一次完整探索、剪掉等待并导出给另一台设备播放，接收者也能随时脱离路线自由探索。
         </p>
         <button class="primary" @click="about = false">开始探索 ↗</button>
       </section>
